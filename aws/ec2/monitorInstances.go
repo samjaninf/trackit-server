@@ -69,6 +69,7 @@ type (
 		Type       string                     `json:"type"`
 		Tags       map[TagName]TagValue       `json:"tags"`
 		Cost       float64                    `json:"cost"`
+		CostDetail map[string]float64         `json:"costDetail"`
 	}
 
 	InstanceStats struct {
@@ -375,6 +376,7 @@ func fetchInstancesList(ctx context.Context, creds *credentials.Credentials,
 				IORead:     stats.IORead,
 				IOWrite:    stats.IOWrite,
 				Cost:       0,
+				CostDetail: make(map[string]float64, 0),
 			}
 		}
 	}

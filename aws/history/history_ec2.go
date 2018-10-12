@@ -237,6 +237,8 @@ func fetchEc2InstancesList(ctx context.Context, creds *credentials.Credentials, 
 		for _, reservation := range instances.Reservations {
 			for _, instance := range reservation.Instances {
 				stats := getEc2InstanceStats(ctx, instance, sess, startDate, endDate)
+				detail :=  make(map[string]float64, 0)
+				detail["instance"] = inst.Cost
 				instanceInfoChan <- tec2.InstanceInfo{
 					Id:         aws.StringValue(instance.InstanceId),
 					Region:     aws.StringValue(instance.Placement.AvailabilityZone),
@@ -252,6 +254,7 @@ func fetchEc2InstancesList(ctx context.Context, creds *credentials.Credentials, 
 					IORead:     stats.IORead,
 					IOWrite:    stats.IOWrite,
 					Cost:       inst.Cost,
+					CostDetail: detail,
 				}
 			}
 		}
@@ -336,9 +339,10 @@ func putEc2ReportInEs(ctx context.Context, report tec2.ReportInfo, aa taws.AwsAc
 }
 
 // filterEc2Instances filters instances and volumes of EC2 instances
-func filterEc2Instances(ec2Cost, cloudwatchCost []CostPerInstance) ([]CostPerInstance, []CostPerInstance) {
-	newInstance := []CostPerInstance{}
-	newVolume   := []CostPerInstance{}
+func filterEc2Instances(ec2Cost, cloudwatchCost []CostPerInstance) ([]CostPerInstance, []CostPerInstance, []CostPerInstance) {
+	newInstance   := []CostPerInstance{}
+	newVolume     := []CostPerInstance{}
+	newCloudWatch := []CostPerInstance{}
 	for _, instance := range ec2Cost {
 		if len(instance.Instance) == 19 && strings.HasPrefix(instance.Instance, "i-") {
 			newInstance = append(newInstance, instance)
@@ -348,13 +352,41 @@ func filterEc2Instances(ec2Cost, cloudwatchCost []CostPerInstance) ([]CostPerIns
 		}
 	}
 	for _, instance := range cloudwatchCost {
-		for i, cost := range newInstance {
+		for _, cost := range newInstance {
 			if strings.Contains(instance.Instance, cost.Instance) {
-				newInstance[i].Cost += instance.Cost
+				newCloudWatch = append(newCloudWatch, instance)
 			}
 		}
 	}
-	return newInstance, newVolume
+	return newInstance, newVolume, newCloudWatch
+}
+
+func addCostToReport(report tec2.ReportInfo, costVolume, costCloudWatch []CostPerInstance) tec2.ReportInfo {
+	for i, instance := range report.Instances {
+		for volume := range instance.IORead {
+			for _, costPerVolume := range costVolume {
+				if string(volume) == costPerVolume.Instance {
+					report.Instances[i].Cost += costPerVolume.Cost
+					report.Instances[i].CostDetail[string(volume)] += costPerVolume.Cost
+				}
+			}
+		}
+		for volume := range instance.IOWrite {
+			for _, costPerVolume := range costVolume {
+				if string(volume) == costPerVolume.Instance {
+					report.Instances[i].Cost += costPerVolume.Cost
+					report.Instances[i].CostDetail[string(volume)] += costPerVolume.Cost
+				}
+			}
+		}
+		for _, costCloudWatchInstance := range costCloudWatch {
+			if strings.Contains(costCloudWatchInstance.Instance, report.Instances[i].Id) {
+				report.Instances[i].Cost += costCloudWatchInstance.Cost
+				report.Instances[i].CostDetail["CloudWatch"] += costCloudWatchInstance.Cost
+			}
+		}
+	}
+	return report
 }
 
 // getEc2HistoryReport puts a monthly report of EC2 instance in ES
@@ -365,7 +397,7 @@ func getEc2HistoryReport(ctx context.Context, ec2Cost []CostPerInstance, cloudwa
 		"startDate":    startDate.Format("2006-01-02T15:04:05Z"),
 		"endDate":      endDate.Format("2006-01-02T15:04:05Z"),
 	})
-	costInstance, costVolume := filterEc2Instances(ec2Cost, cloudwatchCost)
+	costInstance, costVolume, costCloudWatch := filterEc2Instances(ec2Cost, cloudwatchCost)
 	if len(costInstance) == 0 {
 		logger.Info("No EC2 instances found in billing data.", nil)
 		return nil
@@ -378,21 +410,6 @@ func getEc2HistoryReport(ctx context.Context, ec2Cost []CostPerInstance, cloudwa
 	if err != nil {
 		return err
 	}
-	for i, instance := range report.Instances {
-		for volume := range instance.IORead {
-			for _, costPerVolume := range costVolume {
-				if string(volume) == costPerVolume.Instance {
-					report.Instances[i].Cost += costPerVolume.Cost
-				}
-			}
-		}
-		for volume := range instance.IOWrite {
-			for _, costPerVolume := range costVolume {
-				if string(volume) == costPerVolume.Instance {
-					report.Instances[i].Cost += costPerVolume.Cost
-				}
-			}
-		}
-	}
+	report = addCostToReport(report, costVolume, costCloudWatch)
 	return putEc2ReportInEs(ctx, report, aa)
 }

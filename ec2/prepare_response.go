@@ -15,12 +15,12 @@
 package ec2
 
 import (
-	"strings"
 	"context"
 	"net/http"
 	"encoding/json"
 
 	"gopkg.in/olivere/elastic.v5"
+	"strings"
 )
 
 type (
@@ -72,6 +72,7 @@ type (
 		State      string             `json:"state"`
 		Purchasing string             `json:"purchasing"`
 		Cost       float64            `json:"cost"`
+		CostDetail map[string]float64 `json:"costDetail"`
 		CpuAverage float64            `json:"cpuAverage"`
 		CpuPeak    float64            `json:"cpuPeak"`
 		NetworkIn  int64              `json:"networkIn"`
@@ -86,23 +87,31 @@ type (
 
 // addCostToReport adds cost for each instance based on billing data
 func addCostToReport(report Report, costs ResponseCost) (Report) {
-	for _, accounts := range costs.Accounts.Buckets {
-		if accounts.Key != report.Account {
-			continue
-		}
-		for _, instance := range accounts.Instances.Buckets {
-			for i := range report.Instances {
+	for i := range report.Instances {
+		report.Instances[i].CostDetail = make(map[string]float64, 0)
+		for _, accounts := range costs.Accounts.Buckets {
+			if accounts.Key != report.Account {
+				continue
+			}
+			for _, instance := range accounts.Instances.Buckets {
 				if strings.Contains(instance.Key, report.Instances[i].Id) {
 					report.Instances[i].Cost += instance.Cost.Value
+					if len(instance.Key) == 19 && strings.HasPrefix(instance.Key, "i-") {
+						report.Instances[i].CostDetail["instance"] += instance.Cost.Value
+					} else {
+						report.Instances[i].CostDetail["CloudWatch"] += instance.Cost.Value
+					}
 				}
 				for volume := range report.Instances[i].IOWrite {
 					if volume == instance.Key {
 						report.Instances[i].Cost += instance.Cost.Value
+						report.Instances[i].CostDetail[volume] += instance.Cost.Value
 					}
 				}
 				for volume := range report.Instances[i].IORead {
 					if volume == instance.Key {
 						report.Instances[i].Cost += instance.Cost.Value
+						report.Instances[i].CostDetail[volume] += instance.Cost.Value
 					}
 				}
 			}
@@ -143,7 +152,13 @@ func prepareResponseEc2Monthly(ctx context.Context, resEc2 *elastic.SearchResult
 	}
 	for _, account := range response.TopReports.Buckets {
 		if len(account.TopReportsHits.Hits.Hits) > 0 {
-			reports = append(reports, account.TopReportsHits.Hits.Hits[0].Source)
+			report := account.TopReportsHits.Hits.Hits[0].Source
+			for i, instance := range report.Instances {
+				if instance.CostDetail == nil {
+					report.Instances[i].CostDetail = make(map[string]float64, 0)
+	-				}
+			}
+			reports = append(reports, report)
 		}
 	}
 	return reports, nil
